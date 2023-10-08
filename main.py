@@ -8,6 +8,24 @@ import pandas as pd
 import numpy as np
 from scipy import signal
 
+class CyringeCalc():
+    positon_12mL = 1285  # 12mLの目標位置
+    position_0mL = 4090  # 0mLの目標位置
+    a = (positon_12mL - position_0mL) / 12.0
+    b = position_0mL
+    
+    def __init__(self):
+        pass
+
+    def mL_to_position(self, mL):
+        position = int(self.a * mL + self.b)
+        return position
+    
+    def position_to_mL(self, position):
+        mL = (position - self.b) / self.a
+        return mL
+    
+
 # センサの0点を測定，計算する関数
 def calc_sensor_zeros(dll, sensor_port, limit, status):
     print('calclating zeros')
@@ -36,8 +54,22 @@ def calc_sensor_zeros(dll, sensor_port, limit, status):
     if dll.SetSerialMode(sensor_port, False) == False:
         print('連続読み込みモードを停止できません')
         exit()
-
+    print('finish calclating')
     return zeros
+
+
+# シリンジの容量mlからモータの目標位置を計算する関数
+def ml_to_position(mL):
+    positon_12mL = 1285  # 12mLの目標位置
+    position_0mL = 4090  # 0mLの目標位置
+    a = (positon_12mL - position_0mL) / 12.0
+    b = position_0mL
+    position = int(a * mL + b)  # 目標位置
+    return position
+
+# モータ位置からシリンジの容量を計算する関数
+def position_to_mL(position):
+    return 0
 
 
 def main():
@@ -75,7 +107,11 @@ def main():
             exit()
         
         # 操作設定
-        target_posion = float(input('input target position [mL]:'))
+        target_ml = float(input('input target position [mL]:'))
+        cyringe_calc_intance = CyringeCalc()
+        target_position = cyringe_calc_intance.mL_to_position(target_ml)
+        target_positon_8bit_list = list(struct.pack('>H', target_position))
+
         target_time = float(input('input target time [s]:'))
         speed = int(input('input speed (1 ~ 255, max = 0)'))
 
@@ -84,13 +120,16 @@ def main():
         Fz_list = []  # 力測定値
         Fz_filtered_list = []  # フィルタ後の力
         target_position_list = []  # 位置目標値
-        now_position = 0  # 現在の位置の目標値
+        now_position_list = []  # 現在の位置
+        now_position = 0  # 現在の位置
 
         # センサキャリブレーション
         sensor_zeros = calc_sensor_zeros(sensor_dll, sensor_port, limit, status)
 
-        send_data = [0, 1, 0]  # 送信用データ
-        motor_serial = serial.Serial(motor_port, bordrate, timeout = 0.1)
+        send_data = [0] + target_positon_8bit_list + [speed]
+        print(send_data)
+        #send_data = [0, 1, 0]  # 送信用データ
+        motor_serial = serial.Serial(motor_port, bordrate)
         time.sleep(5)
 
         # sキーを押して動作開始
@@ -99,10 +138,9 @@ def main():
             if keyboard.is_pressed('s'):
                 break
         
-        send_data = [0, 200, 0, 1]
+        # 目標位置と速度を送信
         motor_serial.write(send_data)
-        time.sleep(10)
-
+        motor_serial.flush()
 
         start_time = time.perf_counter()  # 開始時間
         time_passed = 0  # 経過時間
@@ -122,25 +160,34 @@ def main():
                 # モータコントローラへ送信
                 send_data = [0, 0, 0, 0]
                 motor_serial.write(send_data)
-                time.sleep(0.2)
+                #time.sleep(0.2)
 
                 # モータコントローラから受信
-                read_data_binary = motor_serial.read_all()
+                #read_data_binary = motor_serial.read_all()
+                read_data_binary = motor_serial.read(3)
                 read_data = struct.unpack('3B', read_data_binary)
-                now_position = read_data[1] + read_data[2] * 256
+                now_position = read_data[1] * 256 + read_data[2]
                 print(now_position)
+                now_position_list.append(now_position)
+
 
                 # インターバル
-                time.sleep(0.005) 
-
-                if time_passed >= target_time:
-                    send_data = [0, 0, 0]
+                time.sleep(0.005)
             
+            # 停止条件
             if keyboard.is_pressed('q'):  # qを押して停止
-                send_data = [2, 0, 0, 0, 0]
+                send_data = [2, 0, 0, 0]
                 motor_serial.write(send_data)
-                time.sleep(0.1)
+                motor_serial.flush()
                 break
+            
+            if time_passed > target_time + 8:
+                break
+            elif time_passed > target_time:
+                send_data = [2, 0, 0, 0]
+                motor_serial.write(send_data)
+            
+
 
         # グラフ描画
         Fz_filtered_list = np.insert(Fz_filtered_list, 0, 0)
@@ -154,12 +201,21 @@ def main():
         plt.pause(5)
 
         # 結果csv保存
-        speed_result_list = []
+        speed_result_list = [0]
         for i in range(len(time_list) - 1):
-            speed_result_list.append(- (target_position_list[i + 1] - target_position_list[i]) / (time_list[i + 1] - time_list[i]) / 13.235)
+            print(now_position_list[i+1])
+            print(now_position_list[i])
+            print(time_list[i+1])
+            print(time_list[i])
+            speed_result_list.append(- (now_position_list[i + 1] - now_position_list[i]) / (time_list[i + 1] - time_list[i]) / 13.235)
+        
+        position_mL_list = []
+        for position in now_position_list:
+            position_mL_list.append(cyringe_calc_intance.position_to_mL(position))
+
         #speed_result_list = signal.lfilter(b, a, speed_result_list)
-        result = pd.DataFrame(zip(time_list, Fz_list, Fz_filtered_list, target_position_list, speed_result_list),
-                               columns = ['Time [s]', 'Fz [N]', 'Fz filtered [N]','target position [-]', 'speed'])
+        result = pd.DataFrame(zip(time_list, Fz_list, now_position_list, speed_result_list, position_mL_list),
+                               columns = ['Time [s]', 'Fz [N]', 'position [-]', 'speed [-]', 'position [mL]'])
         file_name = input('input file name: ')
         result.to_csv('result\\' + file_name + '.csv')   
         print('saving as csv completed')

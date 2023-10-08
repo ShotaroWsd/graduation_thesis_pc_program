@@ -3,7 +3,7 @@
 
 #result フォルダを無視
 result_fig
-result_csv
+result
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
